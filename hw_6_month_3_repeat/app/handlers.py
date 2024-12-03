@@ -1,3 +1,4 @@
+import re
 from aiogram import types, Router, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -9,16 +10,14 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-import smtplib
+import aiosmtplib
 
 router = Router()
-
 
 class SendState(StatesGroup):
     recipient_email = State()
     subject = State()
     content = State()
-
 
 @router.message(CommandStart())
 async def start(message: types.Message):
@@ -28,7 +27,6 @@ async def start(message: types.Message):
         reply_markup=start_keyboards
     )
 
-
 @router.callback_query(F.data.in_({"message", "photo", "video", "audio"}))
 async def start_sending(callback: types.CallbackQuery, state: FSMContext):
     content_type = callback.data
@@ -36,10 +34,9 @@ async def start_sending(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("Введите email получателя:")
     await state.set_state(SendState.recipient_email)
 
-
 @router.message(SendState.recipient_email)
 async def recipient_email_handler(message: types.Message, state: FSMContext):
-    email = message.text
+    email = message.text.strip()
     if "@" not in email or "." not in email:
         await message.answer("Пожалуйста, введите корректный email!")
         return
@@ -60,12 +57,10 @@ async def subject_handler(message: types.Message, state: FSMContext):
         await message.answer(f"Прикрепите {content_type} или отправьте ссылку:")
     await state.set_state(SendState.content)
 
-
 @router.message(SendState.content, F.content_type.in_([ContentType.TEXT, ContentType.PHOTO, ContentType.VIDEO, ContentType.AUDIO]))
 async def content_handler(message: types.Message, state: FSMContext):
     data = await state.get_data()
     content_type = data['content_type']
-
 
     if content_type == "message":
         await state.update_data(content=message.text)
@@ -76,7 +71,6 @@ async def content_handler(message: types.Message, state: FSMContext):
     elif content_type == "audio":
         await state.update_data(content=message.audio.file_id)
 
-
     recipient_email = data['recipient_email']
     subject = data['subject']
     await message.answer(
@@ -84,21 +78,23 @@ async def content_handler(message: types.Message, state: FSMContext):
         reply_markup=confirm_keyboards[content_type]
     )
 
-
 @router.callback_query(F.data.in_({"confirm_message", "confirm_photo", "confirm_video", "confirm_audio", 
                                    "cancel_message", "cancel_photo", "cancel_video", "cancel_audio"}))
 async def confirm_or_cancel(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if "cancel" in callback.data:
-        await callback.message.answer("Отправка отменена. ❌")
-        await state.clear()
-        return
-
     try:
-        recipient_email = data['recipient_email']
-        subject = data['subject']
-        content_type = data['content_type']
-        content = data['content']
+        data = await state.get_data()
+        
+
+        recipient_email = data.get('recipient_email')
+        subject = data.get('subject')
+        content_type = data.get('content_type')
+        content = data.get('content')
+
+        if not recipient_email or not subject or not content_type or not content:
+            await callback.message.answer("Ошибка: данные для отправки неполные. Попробуйте снова.")
+            await state.clear()
+            return
+
         sender = smtp_sender
         password = smtp_password
 
@@ -131,11 +127,13 @@ async def confirm_or_cancel(callback: types.CallbackQuery, state: FSMContext):
                 attachment.add_header('Content-Disposition', f'attachment; filename="{filename}"')
                 msg.attach(attachment)
 
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, password)
-        server.send_message(msg)
-        server.quit()
+
+        smtp_client = aiosmtplib.SMTP(hostname="smtp.gmail.com", port=587, start_tls=True)
+        await smtp_client.connect()
+        await smtp_client.login(sender, password)
+        await smtp_client.send_message(msg)
+        await smtp_client.quit()
+
         await callback.message.answer("Сообщение успешно отправлено! ✅")
     except Exception as e:
         await callback.message.answer(f"Ошибка при отправке: {e}")
